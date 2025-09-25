@@ -6,7 +6,7 @@ import 'supabase_config.dart';
 class ClaimService {
   static final SupabaseClient _client = SupabaseConfig.client;
 
-  // Get user's claims
+  // Get all claims for the current user
   static Future<List<Claim>> getUserClaims() async {
     try {
       final user = _client.auth.currentUser;
@@ -18,12 +18,32 @@ class ClaimService {
           .eq('user_id', user.id)
           .order('created_at', ascending: false);
 
-      return (response as List)
-          .map((json) => Claim.fromJson(json as Map<String, dynamic>))
+      return response
+          .map<Claim>((json) => Claim.fromJson(json))
           .toList();
     } catch (e) {
       developer.log('Error getting user claims: $e');
       rethrow;
+    }
+  }
+
+  // Get a specific claim by ID
+  static Future<Claim?> getClaimById(String claimId) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final response = await _client
+          .from('claims')
+          .select()
+          .eq('id', claimId)
+          .eq('user_id', user.id)
+          .single();
+
+      return Claim.fromJson(response);
+    } catch (e) {
+      developer.log('Error getting claim by ID: $e');
+      return null;
     }
   }
 
@@ -46,29 +66,59 @@ class ClaimService {
     }
   }
 
-  // Update a claim
-  static Future<Claim> updateClaim(Claim claim) async {
+  // Update claim status
+  static Future<Claim> updateClaimStatus(String claimId, String status) async {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
 
       final response = await _client
           .from('claims')
-          .update(claim.toJson())
-          .eq('id', claim.id)
+          .update({'status': status, 'updated_at': DateTime.now().toIso8601String()})
+          .eq('id', claimId)
           .eq('user_id', user.id)
           .select()
           .single();
 
       return Claim.fromJson(response);
     } catch (e) {
-      developer.log('Error updating claim: $e');
+      developer.log('Error updating claim status: $e');
       rethrow;
     }
   }
 
-  // Get claim by ID
-  static Future<Claim?> getClaimById(String claimId) async {
+  // Update claim with AI analysis
+  static Future<Claim> updateClaimWithAnalysis(
+    String claimId,
+    String analysisResult,
+    int riskScore,
+  ) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final response = await _client
+          .from('claims')
+          .update({
+            'adjuster_notes': analysisResult,
+            'updated_at': DateTime.now().toIso8601String(),
+            // Add risk_score field if it exists in your schema
+            // 'risk_score': riskScore,
+          })
+          .eq('id', claimId)
+          .eq('user_id', user.id)
+          .select()
+          .single();
+
+      return Claim.fromJson(response);
+    } catch (e) {
+      developer.log('Error updating claim with analysis: $e');
+      rethrow;
+    }
+  }
+
+  // Get claims by status
+  static Future<List<Claim>> getClaimsByStatus(String status) async {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
@@ -76,31 +126,51 @@ class ClaimService {
       final response = await _client
           .from('claims')
           .select()
-          .eq('id', claimId)
           .eq('user_id', user.id)
-          .maybeSingle();
+          .eq('status', status)
+          .order('created_at', ascending: false);
 
-      if (response == null) return null;
-      return Claim.fromJson(response);
+      return response
+          .map<Claim>((json) => Claim.fromJson(json))
+          .toList();
     } catch (e) {
-      developer.log('Error getting claim by ID: $e');
+      developer.log('Error getting claims by status: $e');
       rethrow;
     }
   }
 
-  // Delete a claim
-  static Future<void> deleteClaim(String claimId) async {
+  // Get claims statistics
+  static Future<Map<String, dynamic>> getClaimsStatistics() async {
     try {
       final user = _client.auth.currentUser;
       if (user == null) throw Exception('User not authenticated');
 
-      await _client
+      final response = await _client
           .from('claims')
-          .delete()
-          .eq('id', claimId)
+          .select()
           .eq('user_id', user.id);
+
+      final claims = (response as List)
+          .map((json) => Claim.fromJson(json as Map<String, dynamic>))
+          .toList();
+
+      final totalClaims = claims.length;
+      final submittedClaims = claims.where((c) => c.status == 'submitted').length;
+      final approvedClaims = claims.where((c) => c.status == 'approved').length;
+      final pendingClaims = claims.where((c) => c.status == 'processing').length;
+      final totalAmount = claims
+          .where((c) => c.claimAmount != null)
+          .fold(0.0, (sum, claim) => sum + claim.claimAmount!);
+
+      return {
+        'total_claims': totalClaims,
+        'submitted_claims': submittedClaims,
+        'approved_claims': approvedClaims,
+        'pending_claims': pendingClaims,
+        'total_amount': totalAmount,
+      };
     } catch (e) {
-      developer.log('Error deleting claim: $e');
+      developer.log('Error getting claims statistics: $e');
       rethrow;
     }
   }

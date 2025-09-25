@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 import '../../core/config.dart';
+import '../../models/claim.dart';
+import '../../services/claim_service.dart';
 
 class ClaimsProcessingScreen extends StatefulWidget {
   const ClaimsProcessingScreen({super.key});
@@ -14,7 +16,8 @@ class ClaimsProcessingScreen extends StatefulWidget {
 }
 
 class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
-  final List<ClaimItem> _claims = [];
+  List<Claim> _claims = [];
+  bool _isLoading = true;
   bool _isAnalyzing = false;
   String _analysisResult = '';
   final ScrollController _scrollController = ScrollController();
@@ -22,7 +25,7 @@ class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
   @override
   void initState() {
     super.initState();
-    _loadDummyClaims();
+    _loadClaims();
   }
 
   @override
@@ -31,44 +34,30 @@ class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
     super.dispose();
   }
 
-  void _loadDummyClaims() {
+  Future<void> _loadClaims() async {
     setState(() {
-      _claims.addAll([
-        ClaimItem(
-          id: 'CL-2023-001',
-          type: 'Auto',
-          status: 'Submitted',
-          date: '2023-11-15',
-          amount: 2450.00,
-          photos: 3,
-          documents: 2,
-          riskScore: 12,
-        ),
-        ClaimItem(
-          id: 'CL-2023-002',
-          type: 'Property',
-          status: 'Pending Review',
-          date: '2023-11-18',
-          amount: 8750.00,
-          photos: 5,
-          documents: 4,
-          riskScore: 68,
-        ),
-        ClaimItem(
-          id: 'CL-2023-003',
-          type: 'Health',
-          status: 'Approved',
-          date: '2023-11-10',
-          amount: 1200.00,
-          photos: 0,
-          documents: 3,
-          riskScore: 5,
-        ),
-      ]);
+      _isLoading = true;
     });
+
+    try {
+      final claims = await ClaimService.getUserClaims();
+      setState(() {
+        _claims = claims;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error loading claims: $e')));
+      }
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
-  Future<void> _analyzeClaim(ClaimItem claim) async {
+  Future<void> _analyzeClaim(Claim claim) async {
     setState(() {
       _isAnalyzing = true;
       _analysisResult = '';
@@ -85,26 +74,47 @@ class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
             {
               "parts": [
                 {
-                  "text": "Act as an insurance claims AI analyzer. Analyze this claim:\n"
-                      "Claim ID: ${claim.id}\n"
-                      "Type: ${claim.type}\n"
-                      "Amount: \$${claim.amount}\n"
-                      "Risk Score: ${claim.riskScore}/100\n\n"
+                  "text":
+                      "Act as an insurance claims AI analyzer. Analyze this claim:\n"
+                      "Claim ID: ${claim.claimNumber}\n"
+                      "Type: ${claim.claimType}\n"
+                      "Amount: \$${claim.claimAmount ?? 0}\n"
+                      "Status: ${claim.status}\n"
+                      "Description: ${claim.description}\n"
+                      "Incident Date: ${claim.incidentDate}\n"
+                      "Documents: ${claim.documentsUrls?.length ?? 0} files\n\n"
                       "Provide: \n"
                       "- Damage assessment \n"
                       "- Fraud likelihood with reasoning\n"
                       "- Recommended action\n"
-                      "Format response with clear markdown bullet points"
-                }
-              ]
-            }
-          ]
+                      "- Risk assessment (score 1-100)\n"
+                      "Format response with clear markdown bullet points",
+                },
+              ],
+            },
+          ],
         }),
       );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final aiResponse = data['candidates'][0]['content']['parts'][0]['text'];
+
+        // Extract risk score from AI response (look for "Risk: X/100" pattern)
+        final riskScoreMatch = RegExp(
+          r'Risk:?\s*(\d+)/100',
+        ).firstMatch(aiResponse);
+        final riskScore = riskScoreMatch != null
+            ? int.parse(riskScoreMatch.group(1)!)
+            : 50;
+
+        // Update claim with analysis
+        await ClaimService.updateClaimWithAnalysis(
+          claim.id,
+          aiResponse,
+          riskScore,
+        );
+
         setState(() {
           _analysisResult = aiResponse;
           // Scroll to bottom after analysis result is shown
@@ -140,7 +150,7 @@ class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
           IconButton(
             icon: const FaIcon(FontAwesomeIcons.arrowsRotate),
             color: Colors.blue[600],
-            onPressed: _loadDummyClaims,
+            onPressed: _loadClaims,
           ),
         ],
       ),
@@ -199,141 +209,217 @@ class _ClaimsProcessingScreenState extends State<ClaimsProcessingScreen> {
 
           // Main content area with scrollable claims and analysis
           Expanded(
-            child: SingleChildScrollView(
-              controller: _scrollController,
-              physics: const AlwaysScrollableScrollPhysics(),
-              child: Column(
-                children: [
-                  // Claims List
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _claims.isEmpty
+                ? Center(
                     child: Column(
-                      children: _claims.map((claim) => ClaimCard(
-                        claim: claim,
-                        onAnalyze: () => _analyzeClaim(claim),
-                      )).toList(),
-                    ),
-                  ),
-
-                  // Analysis Result
-                  if (_analysisResult.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Card(
-                        color: Colors.white,
-                        elevation: 2,
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  FaIcon(
-                                    FontAwesomeIcons.robot,
-                                    color: Colors.teal[400],
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'AI Analysis Result',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.blue[800],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              SizedBox(
-                                // Constrained height for markdown
-                                height: MediaQuery.of(context).size.height * 0.3,
-                                child: SingleChildScrollView(
-                                  child: MarkdownBody(
-                                    data: _analysisResult,
-                                    styleSheet: MarkdownStyleSheet(
-                                      p: TextStyle(
-                                        color: Colors.grey[800],
-                                        fontSize: 14,
-                                        height: 1.4,
-                                      ),
-                                      listBullet: TextStyle(
-                                        color: Colors.grey[800],
-                                        fontSize: 14,
-                                        height: 1.4,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          FontAwesomeIcons.fileCircleXmark,
+                          size: 64,
+                          color: Colors.grey[400],
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No claims found',
+                          style: TextStyle(
+                            fontSize: 18,
+                            color: Colors.grey[600],
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
-                      ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Submit a claim to see it here',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.pushNamed(context, '/claim-form');
+                          },
+                          icon: const Icon(Icons.add),
+                          label: const Text('Submit New Claim'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue[600],
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ],
                     ),
-                ],
-              ),
-            ),
+                  )
+                : SingleChildScrollView(
+                    controller: _scrollController,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Column(
+                      children: [
+                        // Claims List
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Column(
+                            children: _claims
+                                .map(
+                                  (claim) => ClaimCard(
+                                    claim: claim,
+                                    onAnalyze: () => _analyzeClaim(claim),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+
+                        // Analysis Result
+                        if (_analysisResult.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Card(
+                              color: Colors.white,
+                              elevation: 2,
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        FaIcon(
+                                          FontAwesomeIcons.robot,
+                                          color: Colors.teal[400],
+                                          size: 16,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'AI Analysis Result',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.blue[800],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    SizedBox(
+                                      // Constrained height for markdown
+                                      height:
+                                          MediaQuery.of(context).size.height *
+                                          0.3,
+                                      child: SingleChildScrollView(
+                                        child: MarkdownBody(
+                                          data: _analysisResult,
+                                          styleSheet: MarkdownStyleSheet(
+                                            p: TextStyle(
+                                              color: Colors.grey[800],
+                                              fontSize: 14,
+                                              height: 1.4,
+                                            ),
+                                            listBullet: TextStyle(
+                                              color: Colors.grey[800],
+                                              fontSize: 14,
+                                              height: 1.4,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
           ),
 
           // Loading indicator at bottom
-          if (_isAnalyzing)
-            const LinearProgressIndicator(),
+          if (_isAnalyzing) const LinearProgressIndicator(),
         ],
       ),
     );
   }
 }
 
-class ClaimItem {
-  final String id;
-  final String type;
-  final String status;
-  final String date;
-  final double amount;
-  final int photos;
-  final int documents;
-  final int riskScore;
-
-  ClaimItem({
-    required this.id,
-    required this.type,
-    required this.status,
-    required this.date,
-    required this.amount,
-    required this.photos,
-    required this.documents,
-    required this.riskScore,
-  });
-}
-
 class ClaimCard extends StatelessWidget {
-  final ClaimItem claim;
+  final Claim claim;
   final VoidCallback onAnalyze;
 
-  const ClaimCard({
-    required this.claim,
-    required this.onAnalyze,
-    super.key,
-  });
+  const ClaimCard({required this.claim, required this.onAnalyze, super.key});
 
   Color getStatusColor() {
-    switch (claim.status) {
-      case 'Approved':
+    switch (claim.status.toLowerCase()) {
+      case 'approved':
         return Colors.green;
-      case 'Pending Review':
+      case 'processing':
         return Colors.orange;
-      case 'Submitted':
+      case 'submitted':
         return Colors.blue;
+      case 'rejected':
+        return Colors.red;
       default:
         return Colors.grey;
     }
   }
 
   Color getRiskColor() {
-    if (claim.riskScore < 30) return Colors.green;
-    if (claim.riskScore < 70) return Colors.orange;
+    // Calculate risk score based on claim amount and type
+    double riskScore = 50; // Default risk score
+
+    if (claim.claimAmount != null) {
+      if (claim.claimAmount! > 10000) {
+        riskScore = 80;
+      } else if (claim.claimAmount! > 5000) {
+        riskScore = 60;
+      } else if (claim.claimAmount! > 1000) {
+        riskScore = 40;
+      } else {
+        riskScore = 20;
+      }
+    }
+
+    if (claim.claimType == 'theft') {
+      riskScore += 20;
+    }
+    if (claim.claimType == 'accident') {
+      riskScore += 10;
+    }
+
+    if (riskScore < 30) {
+      return Colors.green;
+    }
+    if (riskScore < 70) {
+      return Colors.orange;
+    }
     return Colors.red;
+  }
+
+  int getRiskScore() {
+    double riskScore = 50; // Default risk score
+
+    if (claim.claimAmount != null) {
+      if (claim.claimAmount! > 10000) {
+        riskScore = 80;
+      } else if (claim.claimAmount! > 5000) {
+        riskScore = 60;
+      } else if (claim.claimAmount! > 1000) {
+        riskScore = 40;
+      } else {
+        riskScore = 20;
+      }
+    }
+
+    if (claim.claimType == 'theft') {
+      riskScore += 20;
+    }
+    if (claim.claimType == 'accident') {
+      riskScore += 10;
+    }
+
+    return riskScore.clamp(0, 100).round();
   }
 
   @override
@@ -351,7 +437,7 @@ class ClaimCard extends StatelessWidget {
               children: [
                 Flexible(
                   child: Text(
-                    claim.id,
+                    claim.claimNumber,
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
@@ -370,11 +456,8 @@ class ClaimCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
-                    claim.status,
-                    style: TextStyle(
-                      color: getStatusColor(),
-                      fontSize: 12,
-                    ),
+                    claim.status.toUpperCase(),
+                    style: TextStyle(color: getStatusColor(), fontSize: 12),
                   ),
                 ),
               ],
@@ -382,26 +465,23 @@ class ClaimCard extends StatelessWidget {
             const SizedBox(height: 12),
             _buildInfoRow(
               icon: FontAwesomeIcons.fileLines,
-              text: claim.type,
+              text: claim.claimType.toUpperCase(),
               secondIcon: FontAwesomeIcons.calendar,
-              secondText: claim.date,
+              secondText: claim.incidentDate,
             ),
             const SizedBox(height: 12),
             _buildInfoRow(
               icon: FontAwesomeIcons.sackDollar,
-              text: '\$${claim.amount.toStringAsFixed(2)}',
+              text: '\$${(claim.claimAmount ?? 0).toStringAsFixed(2)}',
               secondIcon: FontAwesomeIcons.images,
-              secondText: '${claim.photos} photos',
+              secondText: '${claim.documentsUrls?.length ?? 0} files',
             ),
             const SizedBox(height: 12),
             _buildInfoRow(
               icon: FontAwesomeIcons.fileCircleCheck,
-              text: '${claim.documents} docs',
+              text: '${claim.documentsUrls?.length ?? 0} docs',
               secondWidget: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 4,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: getRiskColor().withAlpha(20),
                   borderRadius: BorderRadius.circular(12),
@@ -416,11 +496,8 @@ class ClaimCard extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     Text(
-                      'Risk: ${claim.riskScore}/100',
-                      style: TextStyle(
-                        color: getRiskColor(),
-                        fontSize: 12,
-                      ),
+                      'Risk: ${getRiskScore()}/100',
+                      style: TextStyle(color: getRiskColor(), fontSize: 12),
                     ),
                   ],
                 ),
@@ -458,37 +535,20 @@ class ClaimCard extends StatelessWidget {
   }) {
     return Row(
       children: [
-        FaIcon(
-          icon,
-          color: Colors.blue[600],
-          size: 14,
-        ),
+        FaIcon(icon, color: Colors.blue[600], size: 14),
         const SizedBox(width: 8),
-        Text(
-          text,
-          style: TextStyle(
-            color: Colors.grey[700],
-            fontSize: 14,
-          ),
-        ),
+        Text(text, style: TextStyle(color: Colors.grey[700], fontSize: 14)),
         const Spacer(),
         if (secondWidget != null)
           secondWidget
         else if (secondIcon != null && secondText != null)
           Row(
             children: [
-              FaIcon(
-                secondIcon,
-                color: Colors.blue[600],
-                size: 14,
-              ),
+              FaIcon(secondIcon, color: Colors.blue[600], size: 14),
               const SizedBox(width: 8),
               Text(
                 secondText,
-                style: TextStyle(
-                  color: Colors.grey[700],
-                  fontSize: 14,
-                ),
+                style: TextStyle(color: Colors.grey[700], fontSize: 14),
               ),
             ],
           ),
